@@ -1,0 +1,554 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+      "parameters": {
+          "BackendResourceGroupName": {
+              "type": "string",
+              "metadata": {
+                  "description": "Backend resource group"
+              }
+          },
+          "BackendVnetName": {
+              "type": "string",
+              "metadata": {
+                  "Description": "The name of the backend VNET"
+              }
+          },  
+          "BackendASEsubnetRange": {
+              "type": "string",
+              "metadata": {
+                  "Description": "The address range of the ASE subnet created in the backend VNET"
+              }
+          },
+          "FrontendVnetRange": {
+              "type": "string",
+              "metadata": {
+                  "Description": "The address range of the new VNET in CIDR format"
+              }
+          },  
+          "FrontendASEsubnetRange": {
+              "type": "string",
+              "metadata": {
+                  "Description": "The address range of the ASE subnet created in the new VNET"
+              }
+          },
+          "FrontendGatewaysubnetRange": {
+              "type": "string",
+              "metadata": {
+                  "Description": "The address range of the Application Gateway subnet created in the new VNET"
+              }
+          },
+          "EnvironmentName": {
+            "type": "string",
+            "metadata": {
+                "description": "Example: Westdcxprod"
+            }
+            },
+            "SQLAdminUsername": {
+                "type": "string",
+                "metadata": {
+                    "description": "SQL Admin Username"
+                }
+            },
+            "SQLAdminPassword": {
+                "type": "securestring",
+                "metadata": {
+                    "description": "SQL Admin Password"
+                }
+            }  
+      },
+      "variables": {
+          "FrontendRG": "[tolower(resourcegroup().name)]",
+          "RouteTableName": "[concat(variables('frontendrg'),'-ase-routetable')]",
+          "NSGName": "[concat(variables('frontendrg'),'-ase-nsg')]",
+          "AppGatewayName": "[concat(variables('frontendrg'),'-appgateway-ip')]",
+          "AppGatewayDomain": "[concat(variables('frontendrg'),'-appgateway')]",
+          "VNetName": "[concat(variables('frontendrg'),'-vnet')]",
+          "ASESubnetName": "[concat(variables('frontendrg'),'-ase-subnet')]",
+          "BackendPeeringName": "[concat(variables('VNetName'),'/',variables('VNetName'),'-to-',parameters('BackendVnetName'))]",
+          "DCAZE1N02PeeringName": "[concat(variables('VNetName'),'/',variables('VNetName'),'-to-DCAZE1N02')]",
+          "LocationNoSpaces": "[replace(tolower(resourcegroup().location), ' ', '')]",
+          "EnvironmentName": "[tolower(parameters('Environmentname'))]",
+          "SQLServerName": "[concat(variables('environmentname'),'frontend-',variables('LocationNoSpaces'),'-sql')]",
+          "BackendSQLServerName": "[concat(variables('environmentname'),'-sql')]",
+          "CoreDatabaseName": "[concat(variables('SQLServerName'),'/',variables('environmentname'),'frontend-',variables('LocationNoSpaces'),'-core-db')]",
+          "BackendCoreDatabaseName": "[concat(variables('environmentname'),'-core-db')]",
+          "WebDatabaseName": "[concat(variables('SQLServerName'),'/',variables('environmentname'),'frontend-',variables('LocationNoSpaces'),'-web-db')]",
+          "BackendWebDatabaseName": "[concat(variables('environmentname'),'-web-db')]",
+          "RedisCacheName": "[concat(variables('environmentname'),'frontend-',variables('LocationNoSpaces'),'-redis')]"      
+      },
+      "resources": [
+          {
+              "apiVersion": "2015-06-15",
+              "type": "Microsoft.Network/routeTables",
+              "name": "[variables('routetablename')]",
+              "location": "[resourcegroup().location]",
+              "properties": {
+                  "routes": [
+                      {
+                          "name": "default-route",
+                          "properties": {
+                              "addressPrefix": "0.0.0.0/0",
+                              "nextHopType": "Internet"
+                          }
+                      }
+                  ]
+              }
+          },
+          {
+              "apiVersion": "2015-06-15",
+              "type": "Microsoft.Network/networkSecurityGroups",
+              "name": "[variables('NSGName')]",
+              "location": "[resourcegroup().location]",
+              "properties": {
+                  "securityRules": [
+                      {
+                          "name": "Inbound-management",
+                          "properties": {
+                              "description": "Used to manage ASE from public VIP",
+                              "protocol": "*",
+                              "sourcePortRange": "*",
+                              "destinationPortRange": "454-455",
+                              "sourceAddressPrefix": "*",
+                              "destinationAddressPrefix": "*",
+                              "access": "Allow",
+                              "priority": 100,
+                              "direction": "Inbound"
+                          }
+                      },
+                      {
+                          "name": "ASE-internal-inbound",
+                          "properties": {
+                              "description": "ASE-internal-inbound",
+                              "protocol": "*",
+                              "sourcePortRange": "*",
+                              "destinationPortRange": "*",
+                              "sourceAddressPrefix": "[parameters('FrontendASEsubnetRange')]",
+                              "destinationAddressPrefix": "*",
+                              "access": "Allow",
+                              "priority": 110,
+                              "direction": "Inbound"
+                          }
+                      },
+                      {
+                          "name": "Inbound-HTTP",
+                          "properties": {
+                              "description": "Allow HTTP",
+                              "protocol": "*",
+                              "sourcePortRange": "*",
+                              "destinationPortRange": "80",
+                              "sourceAddressPrefix": "*",
+                              "destinationAddressPrefix": "*",
+                              "access": "Allow",
+                              "priority": 120,
+                              "direction": "Inbound"
+                          }
+                      },
+                      {
+                          "name": "Inbound-HTTPS",
+                          "properties": {
+                              "description": "Allow HTTPS",
+                              "protocol": "*",
+                              "sourcePortRange": "*",
+                              "destinationPortRange": "443",
+                              "sourceAddressPrefix": "*",
+                              "destinationAddressPrefix": "*",
+                              "access": "Allow",
+                              "priority": 130,
+                              "direction": "Inbound"
+                          }
+                      },
+                      {
+                          "name": "Inbound-FTP",
+                          "properties": {
+                              "description": "Allow FTP over port 21",
+                              "protocol": "*",
+                              "sourcePortRange": "*",
+                              "destinationPortRange": "21",
+                              "sourceAddressPrefix": "*",
+                              "destinationAddressPrefix": "*",
+                              "access": "Allow",
+                              "priority": 140,
+                              "direction": "Inbound"
+                          }
+                      },
+                      {
+                          "name": "Inbound-FTPS",
+                          "properties": {
+                              "description": "Allow FTPS",
+                              "protocol": "*",
+                              "sourcePortRange": "*",
+                              "destinationPortRange": "990",
+                              "sourceAddressPrefix": "*",
+                              "destinationAddressPrefix": "*",
+                              "access": "Allow",
+                              "priority": 150,
+                              "direction": "Inbound"
+                          }
+                      },
+                      {
+                          "name": "Inbound-FTP-Data",
+                          "properties": {
+                              "description": "RDP",
+                              "protocol": "*",
+                              "sourcePortRange": "*",
+                              "destinationPortRange": "10001-10020",
+                              "sourceAddressPrefix": "*",
+                              "destinationAddressPrefix": "*",
+                              "access": "Allow",
+                              "priority": 160,
+                              "direction": "Inbound"
+                          }
+                      },
+                      {
+                          "name": "Inbound-Remote-Debugging",
+                          "properties": {
+                              "description": "Visual Studio remote debugging",
+                              "protocol": "*",
+                              "sourcePortRange": "*",
+                              "destinationPortRange": "4016-4022",
+                              "sourceAddressPrefix": "*",
+                              "destinationAddressPrefix": "*",
+                              "access": "Allow",
+                              "priority": 170,
+                              "direction": "Inbound"
+                          }
+                      },
+                      {
+                          "name": "Inbound-Backend-ASE",
+                          "properties": {
+                            "provisioningState": "Succeeded",
+                            "protocol": "*",
+                            "sourcePortRange": "*",
+                            "destinationPortRange": "*",
+                            "sourceAddressPrefix": "[parameters('BackendASEsubnetRange')]",
+                            "destinationAddressPrefix": "*",
+                            "access": "Allow",
+                            "priority": 180,
+                            "direction": "Inbound"
+                          }
+                        },                  
+                      {
+                          "name": "Outbound-443",
+                          "properties": {
+                              "description": "Azure Storage blob",
+                              "protocol": "*",
+                              "sourcePortRange": "*",
+                              "destinationPortRange": "443",
+                              "sourceAddressPrefix": "*",
+                              "destinationAddressPrefix": "*",
+                              "access": "Allow",
+                              "priority": 100,
+                              "direction": "Outbound"
+                          }
+                      },
+                      {
+                          "name": "Outbound-SMB",
+                          "properties": {
+                              "description": "Azure Storage queue",
+                              "protocol": "*",
+                              "sourcePortRange": "*",
+                              "destinationPortRange": "445",
+                              "sourceAddressPrefix": "*",
+                              "destinationAddressPrefix": "*",
+                              "access": "Allow",
+                              "priority": 110,
+                              "direction": "Outbound"
+                          }
+                      },
+                      {
+                          "name": "Outbound-DB",
+                          "properties": {
+                              "description": "Database",
+                              "protocol": "*",
+                              "sourcePortRange": "*",
+                              "destinationPortRange": "1433",
+                              "sourceAddressPrefix": "*",
+                              "destinationAddressPrefix": "*",
+                              "access": "Allow",
+                              "priority": 120,
+                              "direction": "Outbound"
+                          }
+                      },
+                      {
+                          "name": "Outbound-DB2",
+                          "properties": {
+                              "description": "Database 2",
+                              "protocol": "*",
+                              "sourcePortRange": "*",
+                              "destinationPortRange": "11000-11999",
+                              "sourceAddressPrefix": "*",
+                              "destinationAddressPrefix": "*",
+                              "access": "Allow",
+                              "priority": 130,
+                              "direction": "Outbound"
+                          }
+                      },
+                      {
+                          "name": "Outbound-DB3",
+                          "properties": {
+                              "description": "Database 3",
+                              "protocol": "*",
+                              "sourcePortRange": "*",
+                              "destinationPortRange": "14000-14999",
+                              "sourceAddressPrefix": "*",
+                              "destinationAddressPrefix": "*",
+                              "access": "Allow",
+                              "priority": 140,
+                              "direction": "Outbound"
+                          }
+                      },
+                      {
+                          "name": "Outbound-DNS",
+                          "properties": {
+                              "description": "DNS",
+                              "protocol": "*",
+                              "sourcePortRange": "*",
+                              "destinationPortRange": "53",
+                              "sourceAddressPrefix": "*",
+                              "destinationAddressPrefix": "*",
+                              "access": "Allow",
+                              "priority": 150,
+                              "direction": "Outbound"
+                          }
+                      },
+                      {
+                          "name": "ASE-internal-outbound",
+                          "properties": {
+                              "description": "Azure Storage queue",
+                              "protocol": "*",
+                              "sourcePortRange": "*",
+                              "destinationPortRange": "*",
+                              "sourceAddressPrefix": "*",
+                              "destinationAddressPrefix": "[parameters('FrontendASEsubnetRange')]",
+                              "access": "Allow",
+                              "priority": 160,
+                              "direction": "Outbound"
+                          }
+                      },
+                      {
+                          "name": "Outbound-80",
+                          "properties": {
+                              "description": "Outbound 80",
+                              "protocol": "*",
+                              "sourcePortRange": "*",
+                              "destinationPortRange": "80",
+                              "sourceAddressPrefix": "*",
+                              "destinationAddressPrefix": "*",
+                              "access": "Allow",
+                              "priority": 170,
+                              "direction": "Outbound"
+                          }
+                      },
+                      {
+                          "name": "ASE-to-VNET",
+                          "properties": {
+                              "description": "ASE to VNET",
+                              "protocol": "*",
+                              "sourcePortRange": "*",
+                              "destinationPortRange": "*",
+                              "sourceAddressPrefix": "*",
+                              "destinationAddressPrefix": "[parameters('FrontendVnetRange')]",
+                              "access": "Allow",
+                              "priority": 180,
+                              "direction": "Outbound"
+                          }
+                      },
+                      {
+                          "name": "Outbound-Backend-ASE",
+                          "properties": {
+                            "provisioningState": "Succeeded",
+                            "protocol": "*",
+                            "sourcePortRange": "*",
+                            "destinationPortRange": "*",
+                            "sourceAddressPrefix": "*",
+                            "destinationAddressPrefix": "[parameters('BackendASEsubnetRange')]",
+                            "access": "Allow",
+                            "priority": 190,
+                            "direction": "Outbound"
+                          }
+                        }
+                  ]
+              }
+          },
+          {
+              "apiVersion": "2018-08-01",
+              "type": "Microsoft.Network/publicIPAddresses",
+              "name": "[variables('AppGatewayName')]",
+              "location": "[resourcegroup().location]",
+              "sku": {
+                  "name": "Basic",
+                  "tier": "Regional"
+                },            
+              "properties": {
+                "publicIPAddressVersion": "IPv4",
+                "publicIPAllocationMethod": "Dynamic",
+                "idleTimeoutInMinutes": 4,
+                "dnsSettings": {
+                  "domainNameLabel": "[variables('AppGatewayDomain')]"
+                }
+              }
+            },      
+          {
+              "apiVersion": "2016-06-01",
+              "type": "Microsoft.Network/virtualNetworks",
+              "name": "[variables('VNetName')]",
+              "location": "[resourcegroup().location]",
+              "dependsOn": [
+                  "[concat('Microsoft.Network/networkSecurityGroups/',  variables('NSGName'))]",
+                  "[concat('Microsoft.Network/routeTables/', variables('routetablename'))]"
+              ],
+              "properties": {
+                  "addressSpace": {
+                      "addressPrefixes": [
+                          "[parameters('FrontendVnetRange')]"
+                      ]
+                  },
+                  "dhcpOptions": {
+                      "dnsServers": ["10.103.162.61","10.103.162.63","168.63.129.16"]
+                    },
+                  "subnets": [
+                      {
+                          "name": "[variables('ASESubnetName')]",
+                          "properties": {
+                              "addressPrefix": "[parameters('FrontendASEsubnetRange')]",
+                              "networkSecurityGroup": {
+                                  "id": "[resourceId('Microsoft.Network/networkSecurityGroups',  variables('NSGName'))]"
+                              },
+                              "routeTable": {
+                                  "id": "[resourceId('Microsoft.Network/routeTables', variables('routetablename'))]"
+                              }
+                          }
+                      },
+                          {
+                              "name": "gateway-subnet",
+                              "properties": {
+                                  "addressPrefix": "[parameters('FrontendGatewaysubnetRange')]",
+                                  "routeTable": {
+                                      "id": "[resourceId('Microsoft.Network/routeTables', variables('routetablename'))]"
+                                  }
+                              }
+                          }
+                      ]
+              }
+          },
+          {
+              "apiVersion": "2016-06-01",
+              "type": "Microsoft.Network/virtualNetworks/virtualNetworkPeerings",
+              "name": "[variables('DCAZE1N02PeeringName')]",
+              "location": "[resourcegroup().location]",
+              "dependsOn": [
+                  "[concat('Microsoft.Network/virtualNetworks/', variables('VNetName'))]"
+              ],
+              "properties": {
+                  "allowVirtualNetworkAccess": true,
+                  "allowForwardedTraffic": true,
+                  "allowGatewayTransit": false,
+                  "useRemoteGateways": false,
+                  "remoteVirtualNetwork": {
+                      "id": "/subscriptions/98127259-089e-4aaf-8026-fbd9ef1c305d/resourceGroups/WPeastVNETRG/providers/Microsoft.Network/virtualNetworks/DCAZE1N02"
+                  }
+              }
+          },
+          {
+              "apiVersion": "2016-06-01",
+              "type": "Microsoft.Network/virtualNetworks/virtualNetworkPeerings",
+              "name": "[variables('BackendPeeringName')]",
+              "location": "[resourcegroup().location]",
+              "dependsOn": [
+                  "[concat('Microsoft.Network/virtualNetworks/', variables('VNetName'))]"
+              ],
+              "properties": {
+                  "allowVirtualNetworkAccess": true,
+                  "allowForwardedTraffic": true,
+                  "allowGatewayTransit": false,
+                  "useRemoteGateways": false,
+                  "remoteVirtualNetwork": {
+                      "id": "[resourceId(parameters('BackendResourceGroupName'),'Microsoft.Network/virtualNetworks',parameters('BackendVnetName'))]"
+                  }
+              }
+          },
+          {
+            "apiVersion": "2015-05-01-preview",
+            "location": "[resourcegroup().location]",
+            "type": "Microsoft.Sql/servers",
+            "name": "[variables('SQLServerName')]",
+            "properties": {
+                "administratorLogin": "[parameters('sqladminusername')]",
+                "administratorLoginPassword": "[parameters('sqladminpassword')]",
+                "version": "12.0"
+            },
+            "resources": [
+                {
+                    "apiVersion": "2014-04-01-preview",
+                    "type": "firewallrules",
+                    "location": "[resourcegroup().location]",
+                    "name": "AllowAllWindowsAzureIps",
+                    "dependsOn": [
+                        "[concat('Microsoft.Sql/servers/', variables('SQLServerName'))]"
+                    ],
+                    "condition": true,
+                    "properties": {
+                        "endIpAddress": "0.0.0.0",
+                        "startIpAddress": "0.0.0.0"
+                    }
+                }
+            ]
+        },
+        {
+            "name": "[variables('CoreDatabaseName')]",
+            "type": "Microsoft.Sql/servers/databases",
+            "apiVersion": "2017-03-01-preview",
+            "location": "[resourcegroup().location]",
+            "dependsOn": [
+                "[concat('Microsoft.Sql/servers/', variables('SQLServerName'))]"
+            ],
+            "sku": {
+              "name": "S1",
+              "tier": "Standard"
+                    },
+            "properties": {
+                "createMode": "Copy",
+                "collation": "SQL_Latin1_General_CP1_CI_AS",
+                "maxSizeBytes": 268435456000,
+                "sourceDatabaseId": "[resourceid(parameters('BackendResourceGroupName'),'microsoft.sql/servers/databases',variables('BackendSQLServerName'),variables('BackendCoreDatabaseName'))]",
+                "zoneRedundant": false
+              }
+        },
+        {
+            "name": "[variables('WebDatabaseName')]",
+            "type": "Microsoft.Sql/servers/databases",
+            "apiVersion": "2017-03-01-preview",
+            "location": "[resourcegroup().location]",
+            "dependsOn": [
+                "[concat('Microsoft.Sql/servers/', variables('SQLServerName'))]"
+            ],
+            "sku": {
+              "name": "P4",
+              "tier": "Premium"
+                    },
+            "properties": {
+                "createMode": "Copy",
+                "collation": "SQL_Latin1_General_CP1_CI_AS",
+                "maxSizeBytes": 268435456000,
+                "sourceDatabaseId": "[resourceid(parameters('BackendResourceGroupName'),'microsoft.sql/servers/databases',variables('BackendSQLServerName'),variables('BackendWebDatabaseName'))]",
+                "zoneRedundant": false
+              }
+        },
+        {
+            "apiVersion": "2018-03-01",
+            "type": "Microsoft.Cache/Redis",
+            "name": "[variables('RedisCacheName')]",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "sku": {
+                    "name": "Standard",
+                    "family": "C",
+                    "capacity": 1
+                },
+                "redisConfiguration": {},
+                "enableNonSslPort": false
+            } 
+        }
+      ]
+  }
